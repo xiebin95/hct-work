@@ -1,14 +1,12 @@
 # model
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.models import Sequential
+from tensorflow.keras.models import  Model
 from tensorflow.keras.layers import Conv2D, Conv2DTranspose, UpSampling2D, MaxPooling2D
 from tensorflow.keras.layers import Dropout, Input
 from tensorflow.keras.initializers import Constant
 
-# from tensorflow.nn import conv2d_transpose
 
-image_shape = (160, 576)
 
 
 def bilinear_upsample_weights(factor, number_of_classes):
@@ -30,30 +28,9 @@ def bilinear_upsample_weights(factor, number_of_classes):
     return weights
 
 
-class MyModel(tf.keras.Model):
-    def __init__(self, n_class):
-        super().__init__()
-        self.vgg16_model = self.load_vgg()
-
-        self.conv_test = Conv2D(filters=n_class, kernel_size=(1, 1))  # 分类层
-        self.deconv_test = Conv2DTranspose(filters=n_class,
-                                           kernel_size=(64, 64),
-                                           strides=(32, 32),
-                                           padding='same',
-                                           activation='sigmoid',
-                                           kernel_initializer=Constant(bilinear_upsample_weights(32, n_class)))  # 上采样层
-
-
-
-    def load_vgg(self):
-        # 加载vgg16模型，其中注意input_tensor，include_top
-        vgg16_model = tf.keras.applications.vgg16.VGG16(weights='imagenet', include_top=False,
-                                                        input_tensor=Input(shape=(image_shape[0], image_shape[1], 3)))
-        for layer in vgg16_model.layers[:15]:
-            layer.trainable = False  # 不训练前15层模型
-        return vgg16_model
 
 class VGG16_Basic(tf.keras.Model):
+
     def __init__(self):
         super(VGG16_Basic,self).__init__()
         #   CONV第一层
@@ -85,16 +62,110 @@ class VGG16_Basic(tf.keras.Model):
         self.Maxpool5 = MaxPooling2D(pool_size=(3, 3), strides=2)
 
 
-
-
-    def forward(self,x):
+    def __call__(self,x):
         f1 =  self.Maxpool1(self.Conv1_2(self.Conv1_1(x)))
         f2 = self.Maxpool2(self.Conv2_2(self.Conv2_1(f1)))
         f3 = self.Maxpool3(self.Conv3_3(self.Conv3_2(self.Conv3_1(f2))))
         f4 = self.Maxpool4((self.Conv4_3(self.Conv4_2(self.Conv4_1(f3)))))
         f5 = self.Maxpool5((self.Conv5_3(self.Conv5_2(self.Conv5_1(f4)))))
-        return f3,f4,f5
-test  = VGG16_Basic()
-input_array = tf.random.truncated_normal([10,224,224,3],mean=0,stddev=1)
-f3,f4,f5 = test.forward(input_array)
-print(f3.shape,f4.shape,f5.shape)
+
+        return [f3,f4,f5]
+
+    def net(self,x):
+        data_input = Input(shape =x.shape[1:])
+        [f3, f4, f5] = self.__call__(data_input)
+        net = Model(inputs=data_input, outputs=f5)
+        net.build(x.shape)
+        net.summary()
+        return net
+
+
+
+
+class fcn8s_vgg16(tf.keras.Model):
+
+    def __init__(self,nclass):
+        super(fcn8s_vgg16,self).__init__()
+        self.encode = VGG16_Basic()
+
+        #全卷积层6
+        self.fc6 = Conv2D(filters = 4096, kernel_size = (7,7),padding="same", activation="relu")
+        self.drop6 = Dropout(0)
+
+        #全卷积层7
+        self.fc7 = Conv2D(filters = 4096, kernel_size = (1,1),padding="same", activation="relu")
+        self.drop7 = Dropout(0)
+
+        #classfier
+        self.final_classfier = Conv2D(filters = nclass, kernel_size = (1,1),padding="same")
+        self.f3_classfier = Conv2D(filters = nclass, kernel_size = (1,1),padding="same")
+        self.f4_classfier = Conv2D(filters = nclass, kernel_size = (1,1),padding="same")
+
+        self.up2time = Conv2DTranspose(filters=nclass,
+                                           kernel_size=(4, 4),
+                                           strides=(2, 2),
+                                           padding='same',
+                                           activation='sigmoid',
+                                           kernel_initializer=Constant(bilinear_upsample_weights(2, nclass)))
+        self.up4time = Conv2DTranspose(filters=nclass,
+                                       kernel_size=(4, 4),
+                                       strides=(2, 2),
+                                       padding='same',
+                                       activation='sigmoid',
+                                       kernel_initializer=Constant(bilinear_upsample_weights(2, nclass)))
+
+        self.up32time = Conv2DTranspose(filters=nclass,
+                                       kernel_size=(16, 16),
+                                       strides=(8, 8),
+                                       padding='same',
+                                       activation='sigmoid',
+                                       kernel_initializer=Constant(bilinear_upsample_weights(8, nclass)))
+
+
+
+    def __call__(self,x,pad =True):
+        if pad:
+            x_pad = self.input_pad(x)
+        else:
+            x_pad = x
+        f3, f4, f5 = self.encode(x_pad)
+        f6 = self.drop6(self.fc6(f5))
+        f7 = self.final_classfier(self.drop7(self.fc7(f6)))
+
+        up2_feat = self.up2time(f7)
+        h = self.f3_classfier(f4)
+        h = h[:, h.shape[1]-up2_feat.shape[1]: h.shape[1], h.shape[2]-up2_feat.shape[2]:h.shape[2],:]
+        h = h + up2_feat
+
+        up4_feat = self.up4time(h)
+        h = self.f4_classfier(f3)
+        h = h[:, h.shape[1]-up4_feat.shape[1]:h.shape[1], h.shape[2]-up4_feat.shape[2]:h.shape[2], :]
+        h = h + up4_feat
+
+        h = self.up32time(h)
+        final_scores = h[:, h.shape[1]-x.shape[1]:h.shape[1], h.shape[2]-x.shape[2]:h.shape[2], :]
+
+        return final_scores
+
+    def net(self,x):
+        x_pad = self.input_pad(x)
+        data_input = Input(shape =x_pad.shape[1:])
+        final_scores = self.__call__(data_input,pad=False)
+        net = Model(inputs=data_input, outputs=final_scores)
+        net.build(x.shape)
+        net.summary()
+        return net
+
+    def input_pad(self,x):
+        ori_n, ori_h, ori_w, ori_c = x.shape
+        x_mask = np.zeros([ori_n, ori_h + 200, ori_w + 200, ori_c]).astype(np.float32)
+
+        x_mask[:, 100:100 + ori_h, 100:100 + ori_w, :] = x[:, :, :, :].astype(np.float32)
+        return x_mask
+
+test  = fcn8s_vgg16(21)
+# input_array = tf.random.truncated_normal([10,256,256,3],mean=0,stddev=1)
+input_array = np.random.randint(0,255,(10,224,224,3)).astype(np.float32)
+final_scores = test(input_array)
+
+print(test.net(input_array))
