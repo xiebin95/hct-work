@@ -2,9 +2,11 @@
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.models import  Model
-from tensorflow.keras.layers import Conv2D, Conv2DTranspose, UpSampling2D, MaxPooling2D
-from tensorflow.keras.layers import Dropout, Input
+from tensorflow.keras.layers import Conv2D, Conv2DTranspose, UpSampling2D, MaxPooling2D,BatchNormalization,Activation
+from tensorflow.keras.layers import Dropout, Input, Add,ZeroPadding2D
 from tensorflow.keras.initializers import Constant
+
+
 
 
 
@@ -125,7 +127,8 @@ class fcn8s_vgg16(tf.keras.Model):
 
     def __call__(self,x,pad =True):
         if pad:
-            x_pad = self.input_pad(x)
+            # x_pad = self.input_pad(x)
+            x_pad = ZeroPadding2D((100,100))(x)
         else:
             x_pad = x
         f3, f4, f5 = self.encode(x_pad)
@@ -148,9 +151,8 @@ class fcn8s_vgg16(tf.keras.Model):
         return final_scores
 
     def net(self,x):
-        x_pad = self.input_pad(x)
-        data_input = Input(shape =x_pad.shape[1:])
-        final_scores = self.__call__(data_input,pad=False)
+        data_input = Input(shape =x.shape[1:])
+        final_scores = self.__call__(data_input)
         net = Model(inputs=data_input, outputs=final_scores)
         net.build(x.shape)
         net.summary()
@@ -163,9 +165,62 @@ class fcn8s_vgg16(tf.keras.Model):
         x_mask[:, 100:100 + ori_h, 100:100 + ori_w, :] = x[:, :, :, :].astype(np.float32)
         return x_mask
 
-test  = fcn8s_vgg16(21)
-# input_array = tf.random.truncated_normal([10,256,256,3],mean=0,stddev=1)
-input_array = np.random.randint(0,255,(10,224,224,3)).astype(np.float32)
-final_scores = test(input_array)
+class ResNet101(object):
 
-print(test.net(input_array))
+    def BottleNeck(self,input_tensor, in_channel, stride=1):
+        out_channel = in_channel * 4
+        if stride > 1:
+            if in_channel == 64:
+                shortcut = Conv2D(out_channel, 1, strides=1)(input_tensor)
+                stride = 1
+            else:
+                shortcut = Conv2D(out_channel, 1, strides=stride)(input_tensor)
+        else:
+            shortcut = input_tensor
+        x = Conv2D(in_channel, 1, strides=stride)(input_tensor)
+        x = BatchNormalization()(x)
+        x = Activation("relu")(x)
+
+        x = Conv2D(in_channel, 3, padding="same")(x)
+        x = BatchNormalization()(x)
+        x = Activation("relu")(x)
+
+        x = Conv2D(out_channel, 1)(x)
+        x = BatchNormalization()(x)
+        x += shortcut
+        x = Activation("relu")(x)
+        return x
+
+
+
+    def _make_layer(self, input_tensor, kernel_num, layer_num):
+        x = self.BottleNeck(input_tensor, kernel_num, 2)
+        for _ in range(1, layer_num):
+            x = self.BottleNeck(x, kernel_num, 1)
+
+        return x
+
+    def __call__(self, input_tensor, n_classes=21, *args, **kwargs):
+        x = Conv2D(64, 7, strides=2)(input_tensor)
+        x = BatchNormalization()(x)
+        x = Activation("relu")(x)
+
+        x = MaxPooling2D(3, 2)(x)
+
+        x = self._make_layer(x, 64,3)
+        f3 = self._make_layer(x, 128,4)
+        f4 = self._make_layer(f3, 256,23)
+        f5 = self._make_layer(f4, 512,3)
+
+        return f3, f4, f5
+
+input_array = tf.random.truncated_normal([10,224,224,3],mean=0,stddev=1)
+# input_array = np.random.randint(0,255,(10,224,224,3)).astype(np.float32)
+# test  = fcn8s_vgg16(21)
+# final_scores = test(input_array)
+# print(final_scores.shape)
+# print(test.net(input_array))
+
+test_resnet = ResNet101()
+f3, f4, f5 = test_resnet(input_array)
+print(f3.shape,f4.shape,f5.shape)
