@@ -7,10 +7,7 @@ from tensorflow.keras.layers import Dropout, Input, Add,ZeroPadding2D
 from tensorflow.keras.initializers import Constant
 
 
-
-
-
-
+#双线性插值上采样
 def bilinear_upsample_weights(factor, number_of_classes):
     """初始化权重参数"""
 
@@ -30,7 +27,7 @@ def bilinear_upsample_weights(factor, number_of_classes):
     return weights
 
 
-
+#VGG16基础模型
 class VGG16_Basic(tf.keras.Model):
 
     def __init__(self):
@@ -83,7 +80,7 @@ class VGG16_Basic(tf.keras.Model):
 
 
 
-
+#FCN8S_VGG16
 class fcn8s_vgg16(tf.keras.Model):
 
     def __init__(self,nclass):
@@ -165,7 +162,8 @@ class fcn8s_vgg16(tf.keras.Model):
         x_mask[:, 100:100 + ori_h, 100:100 + ori_w, :] = x[:, :, :, :].astype(np.float32)
         return x_mask
 
-class ResNet101(object):
+#ResNet101基础结构
+class ResNet101(tf.keras.Model):
 
     def BottleNeck(self,input_tensor, in_channel, stride=1):
         out_channel = in_channel * 4
@@ -214,13 +212,89 @@ class ResNet101(object):
 
         return f3, f4, f5
 
-input_array = tf.random.truncated_normal([10,224,224,3],mean=0,stddev=1)
-# input_array = np.random.randint(0,255,(10,224,224,3)).astype(np.float32)
-# test  = fcn8s_vgg16(21)
-# final_scores = test(input_array)
-# print(final_scores.shape)
-# print(test.net(input_array))
+    def net(self, x):
+        data_input = Input(shape=x.shape[1:])
+        f3, f4, f5 = self.__call__(data_input)
+        net = Model(inputs=data_input, outputs=f5)
+        net.build(x.shape)
+        net.summary()
+        return net
 
-test_resnet = ResNet101()
-f3, f4, f5 = test_resnet(input_array)
-print(f3.shape,f4.shape,f5.shape)
+#fcn8s_resnet101
+class fcn8s_resnet101(tf.keras.Model):
+
+    def __init__(self,nclass):
+        super(fcn8s_resnet101,self).__init__()
+        self.encode = ResNet101()
+
+        #classfier
+        self.final_classfier = Conv2D(filters = nclass, kernel_size = (1,1),padding="same")
+        self.f3_classfier = Conv2D(filters = nclass, kernel_size = (1,1),padding="same")
+        self.f4_classfier = Conv2D(filters = nclass, kernel_size = (1,1),padding="same")
+
+        self.up2time = Conv2DTranspose(filters=nclass,
+                                           kernel_size=(4, 4),
+                                           strides=(2, 2),
+                                           padding='same',
+                                           activation='sigmoid',
+                                           kernel_initializer=Constant(bilinear_upsample_weights(2, nclass)))
+        self.up4time = Conv2DTranspose(filters=nclass,
+                                       kernel_size=(4, 4),
+                                       strides=(2, 2),
+                                       padding='same',
+                                       activation='sigmoid',
+                                       kernel_initializer=Constant(bilinear_upsample_weights(2, nclass)))
+
+        self.up32time = Conv2DTranspose(filters=nclass,
+                                       kernel_size=(16, 16),
+                                       strides=(8, 8),
+                                       padding='same',
+                                       activation='sigmoid',
+                                       kernel_initializer=Constant(bilinear_upsample_weights(8, nclass)))
+
+
+
+    def __call__(self,x):
+
+        f3, f4, f5 = self.encode(x)
+
+        f7 = self.final_classfier(f5)
+
+        up2_feat = self.up2time(f7)
+        h = self.f3_classfier(f4)
+        h = h[:, h.shape[1]-up2_feat.shape[1]: h.shape[1], h.shape[2]-up2_feat.shape[2]:h.shape[2],:]
+        h = h + up2_feat
+
+        up4_feat = self.up4time(h)
+        h = self.f4_classfier(f3)
+        h = h[:, h.shape[1]-up4_feat.shape[1]:h.shape[1], h.shape[2]-up4_feat.shape[2]:h.shape[2], :]
+        h = h + up4_feat
+
+        h = self.up32time(h)
+        final_scores = h[:, h.shape[1]-x.shape[1]:h.shape[1], h.shape[2]-x.shape[2]:h.shape[2], :]
+
+        return final_scores
+
+    def net(self,x):
+        data_input = Input(shape =x.shape[1:])
+        final_scores = self.__call__(data_input)
+        net = Model(inputs=data_input, outputs=final_scores)
+        net.build(x.shape)
+        net.summary()
+        return net
+
+
+
+input_array = tf.random.truncated_normal([10,256,256,3],mean=0,stddev=1)
+# input_array = np.random.randint(0,255,(10,224,224,3)).astype(np.float32)
+#fcn8s_vgg16fcn8s_resnet101
+test_fcn8s_vgg16  = fcn8s_vgg16(21)
+final_scores = test_fcn8s_vgg16(input_array)
+print(final_scores.shape)
+print(test_fcn8s_vgg16.net(input_array))
+
+#fcn8s_resnet101
+test_fcn8s_resnet101  = fcn8s_resnet101(21)
+final_scores = test_fcn8s_resnet101(input_array)
+print(final_scores.shape)
+print(test_fcn8s_resnet101.net(input_array))
