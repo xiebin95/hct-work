@@ -7,7 +7,7 @@ from tensorflow.keras.layers import Dropout, Input, Add,ZeroPadding2D
 from tensorflow.keras.initializers import Constant
 
 
-#双线性插值上采样
+#上采样模块权重初始化
 def bilinear_upsample_weights(factor, number_of_classes):
     """初始化权重参数"""
 
