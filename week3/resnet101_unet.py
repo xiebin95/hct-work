@@ -1,7 +1,7 @@
 # model
 import numpy as np
-import cv2
 import tensorflow as tf
+from tensorflow.keras.backend import  concatenate
 from tensorflow.keras.models import  Model
 from tensorflow.keras.layers import Conv2D, Conv2DTranspose, UpSampling2D, MaxPooling2D,BatchNormalization,Activation
 from tensorflow.keras.layers import Dropout, Input, Add,ZeroPadding2D
@@ -66,90 +66,29 @@ class ResNet101(tf.keras.Model):
 
         return x
 
-    def __call__(self, input_tensor, n_classes=21, *args, **kwargs):
+    def __call__(self, input_tensor):
         x = Conv2D(64, 7, strides=2)(input_tensor)
         x = BatchNormalization()(x)
         x = Activation("relu")(x)
 
         x = MaxPooling2D(3, 2)(x)
 
-        x = self._make_layer(x, 64,3)
-        f3 = self._make_layer(x, 128,4)
+        f2 = self._make_layer(x, 64,3)
+        f3 = self._make_layer(f2, 128,4)
         f4 = self._make_layer(f3, 256,23)
         f5 = self._make_layer(f4, 512,3)
 
-        return f3, f4, f5
+        return f2,f3, f4, f5
 
     def net(self, x):
         data_input = Input(shape=x.shape[1:])
-        f3, f4, f5 = self.__call__(data_input)
+        f2,f3, f4, f5 = self.__call__(data_input)
         net = Model(inputs=data_input, outputs=f5)
         net.build(x.shape)
         net.summary()
         return net
 
-#fcn8s_resnet101
-class fcn8s_resnet101(tf.keras.Model):
 
-    def __init__(self,nclass):
-        super(fcn8s_resnet101,self).__init__()
-        self.encode = ResNet101()
-
-        #classfier
-        self.final_classfier = Conv2D(filters = nclass, kernel_size = (1,1),padding="same")
-        self.f3_classfier = Conv2D(filters = nclass, kernel_size = (1,1),padding="same")
-        self.f4_classfier = Conv2D(filters = nclass, kernel_size = (1,1),padding="same")
-
-        self.up2time = Conv2DTranspose(filters=nclass,
-                                           kernel_size=(4, 4),
-                                           strides=(2, 2),
-                                           padding='same',
-                                           activation='sigmoid',
-                                           kernel_initializer=Constant(bilinear_upsample_weights(2, nclass)))
-        self.up4time = Conv2DTranspose(filters=nclass,
-                                       kernel_size=(4, 4),
-                                       strides=(2, 2),
-                                       padding='same',
-                                       activation='sigmoid',
-                                       kernel_initializer=Constant(bilinear_upsample_weights(2, nclass)))
-
-        self.up32time = Conv2DTranspose(filters=nclass,
-                                       kernel_size=(16, 16),
-                                       strides=(8, 8),
-                                       padding='same',
-                                       activation='sigmoid',
-                                       kernel_initializer=Constant(bilinear_upsample_weights(8, nclass)))
-
-
-
-    def __call__(self,x):
-
-        f3, f4, f5 = self.encode(x)
-
-        f7 = self.final_classfier(f5)
-
-        up2_feat = self.up2time(f7)
-        h = self.f3_classfier(f4)
-        h = h[:, h.shape[1]-up2_feat.shape[1]: h.shape[1], h.shape[2]-up2_feat.shape[2]:h.shape[2],:]
-        h = h + up2_feat
-
-        up4_feat = self.up4time(h)
-        h = self.f4_classfier(f3)
-        h = h[:, h.shape[1]-up4_feat.shape[1]:h.shape[1], h.shape[2]-up4_feat.shape[2]:h.shape[2], :]
-        h = h + up4_feat
-
-        h = self.up32time(h)
-        final_scores = h[:, h.shape[1]-x.shape[1]:h.shape[1], h.shape[2]-x.shape[2]:h.shape[2], :]
-
-        return final_scores
-
-    def net(self,x):
-        data_input = Input(shape =x.shape[1:])
-        final_scores = self.__call__(data_input)
-        net = Model(inputs=data_input, outputs=final_scores)
-        net.build(x.shape)
-        net.summary()
-        return net
 
 
 def bilinear_interpolation(img, out_dim):
@@ -162,28 +101,111 @@ def bilinear_interpolation(img, out_dim):
     for i in range(3):
         for dst_y in range(dst_h):
             for dst_x in range(dst_w):
-                # find the origin x and y coordinates of dst image x and y
-                # use geometric center symmetry
-                # if use direct way, src_x = dst_x * scale_x
+
                 src_x = (dst_x + 0.5) * scale_x - 0.5
                 src_y = (dst_y + 0.5) * scale_y - 0.5
 
-                # find the coordinates of the points which will be used to compute the interpolation
                 src_x0 = int(np.floor(src_x))
                 src_x1 = min(src_x0 + 1, src_w - 1)
                 src_y0 = int(np.floor(src_y))
                 src_y1 = min(src_y0 + 1, src_h - 1)
 
-                # calculate the interpolation
                 temp0 = (src_x1 - src_x) * img[src_y0, src_x0, i] + (src_x - src_x0) * img[src_y0, src_x1, i]
                 temp1 = (src_x1 - src_x) * img[src_y1, src_x0, i] + (src_x - src_x0) * img[src_y1, src_x1, i]
                 dst_img[dst_y, dst_x, i] = int((src_y1 - src_y) * temp0 + (src_y - src_y0) * temp1)
 
     return dst_img
 
-img = cv2.imread('/home/xb/图片/1.jpeg')
-h,w,c = img.shape
-print(h,w)
-img_result = bilinear_interpolation(img,(w*2,h*2))
-print(img_result.shape)
-cv2.imwrite('img_result.png',img_result)
+class UNetConvBlock(tf.keras.Model):
+    def __call__(self, input_tensor, out_chans):
+        super(UNetConvBlock, self).__init__()
+        #第一次卷积
+        out = Conv2D(filters=out_chans, kernel_size=(3, 3), padding="valid")(input_tensor)
+        out = Activation("relu")(out)
+        out = BatchNormalization()(out)
+
+        #第二次卷积
+        out = Conv2D(filters=out_chans, kernel_size=(3, 3), padding="valid")(out)
+        out = Activation("relu")(out)
+        out = BatchNormalization()(out)
+        return out
+
+class UNetUpBlock(tf.keras.Model):
+    def __init__(self, out_chans, up_mode):
+        super(UNetUpBlock, self).__init__()
+        self.outchanels = out_chans
+        self.up_mode = up_mode
+        if up_mode == 'upconv':
+            self.up = Conv2DTranspose(filters=out_chans,
+                                           kernel_size=(4, 4),
+                                           strides=(2, 2),
+                                           padding='same',
+                                           activation='sigmoid')
+        elif up_mode == 'upsample':
+            self.up = UpSampling2D(size = 2,interpolation = 'bilinear')
+            # self.up = UpSampling2D()
+
+
+        self.conv_block = UNetConvBlock()
+
+    def center_crop(self, layer, target_size):
+        _, layer_height, layer_width,_ = layer.shape
+
+        diff_y = (layer_height - target_size[0]) // 2
+        diff_x = (layer_width - target_size[1]) // 2
+        return layer[
+            :,  diff_y : (diff_y + target_size[0]), diff_x : (diff_x + target_size[1]),:
+        ]
+
+    def __call__(self, x, bridge):
+        if self.up_mode == 'upsample':
+            up =  Conv2D(filters=self.outchanels, kernel_size=(1, 1))(self.up(x))
+        else:
+            up = self.up(x)
+
+        crop1 = self.center_crop(bridge, up.shape[1:3])
+        print(up.shape,crop1.shape)
+        out = concatenate((up, crop1), -1)
+        print(out.shape)
+        out = self.conv_block(out,up.shape[-1])
+
+
+        return out
+
+#unet_resnet101
+class unet_resnet101(tf.keras.Model):
+
+    def __init__(
+            self,
+            n_classes=2,
+            depth=5,
+            wf=6,
+            up_mode='upconv',
+    ):
+        super(unet_resnet101, self).__init__()
+        assert up_mode in ('upconv', 'upsample')
+        self.depth = depth
+        self.encode = ResNet101()
+        self.up_path = []
+        for i in reversed(range(2, depth)):
+            self.up_path.append(
+                UNetUpBlock( 2 ** (wf + i), up_mode)
+            )
+
+        self.last = Conv2D(filters=n_classes, kernel_size=(1, 1))
+
+    def __call__(self, x):
+        f2,f3,f4,f5 = self.encode(x)
+        blocks = [ f2,f3,f4,f5]
+        x = blocks[-1]
+        for i, up in enumerate(self.up_path):
+            print(i)
+            print(x.shape)
+            x = up(x, blocks[-i - 2])
+            print(x.shape)
+
+        return self.last(x)
+input_array = tf.random.truncated_normal([10,572,572,1],mean=0,stddev=1)
+unet_resnet101_test = unet_resnet101()
+result = unet_resnet101_test(input_array)
+print(result.shape)
